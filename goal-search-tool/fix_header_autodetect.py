@@ -69,6 +69,23 @@ def fix_sst(s):
     new = old + '　※見出しの前に「○件のデータが検索されました」等の行があってもOK（先頭10行以内なら見出し行を自動検出します）'
     return s.replace(old, new)
 
+
+def fix_styles(s):
+    # 条件付き書式用 dxf の塗りつぶしを Excel が描画できる形式に修正。
+    # dxf 内の solid 塗りは bgColor で指定する必要があるが、
+    # fgColor のみ (patternType="solid") で書かれていたため、Excel では
+    # 塗りが出ず「白文字だけ適用されて見えない」状態になっていた。
+    i = s.find('<dxfs')
+    j = s.find('</dxfs>')
+    assert i >= 0 and j > i
+    block = s[i:j]
+    block, n = re.subn(
+        r'<fill><patternFill patternType="solid"><fgColor rgb="([0-9A-F]{8})"/></patternFill></fill>',
+        r'<fill><patternFill><bgColor rgb="\1"/></patternFill></fill>',
+        block)
+    assert n == 4, f'dxf fills fixed: {n}'
+    return s[:i] + block + s[j:]
+
 FIXERS = {
     'xl/worksheets/sheet4.xml': fix_sheet4,
     'xl/worksheets/sheet3.xml': fix_sheet3,
@@ -76,6 +93,7 @@ FIXERS = {
     'xl/_rels/workbook.xml.rels': fix_rels,
     '[Content_Types].xml': fix_content_types,
     'xl/sharedStrings.xml': fix_sst,
+    'xl/styles.xml': fix_styles,
 }
 
 zin = zipfile.ZipFile(SRC)
