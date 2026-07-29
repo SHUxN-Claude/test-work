@@ -27,6 +27,31 @@ def add_paste_sheet(wb):
     t = ws.cell(row=2, column=2, value="■ PDF貼付シート")
     t.font = Font(name=FONT_NAME, bold=True, size=14)
 
+    # 初回セットアップ前は、このファイルはマクロを1つも持たない .xlsx である。
+    # その状態で Alt+F8 を押すとマクロ一覧が空で表示され迷うため、最上部に手順を置く。
+    warn = [
+        "【重要】いまのファイル形式(.xlsx)ではボタンは使えません。",
+        "　　　　下の「初回セットアップ」を先に行ってください。",
+        "　　　　(Alt+F8 のマクロ一覧が空なのは、セットアップがまだのためです)",
+    ]
+    for i, s in enumerate(warn):
+        c = ws.cell(row=4 + i, column=2, value=s)
+        c.font = Font(name=FONT_NAME, size=10, color="C00000",
+                      bold=(i == 0))
+
+    setup = [
+        "【初回セットアップ(最初に1回だけ・2〜3分)】",
+        "  1. Alt+F11 を押してVBA画面を開く",
+        "  2. メニューの「ファイル」→「ファイルのインポート」で、配布された vba フォルダの",
+        "     modMain.bas / modEngine.bas / modEmbedded.bas を1つずつ、計3回インポートする",
+        "  3. Alt+F11 でExcelに戻り、F12(名前を付けて保存)を押す",
+        "  4. ファイルの種類を「Excel マクロ有効ブック (*.xlsm)」に変えて保存する ← 重要",
+        "  5. Alt+F8 →「初期設定」を実行すると、このシートにボタンが3つ設置されます",
+    ]
+    for i, s in enumerate(setup):
+        c = ws.cell(row=9 + i, column=2, value=s)
+        c.font = Font(name=FONT_NAME, size=10, bold=s.startswith("【"))
+
     steps = [
         "【使い方1: ファイル選択(推奨)】",
         "  「PDFファイルを選択して取込」ボタンを押し、配布されたPDFを選ぶだけです(複数選択可)。",
@@ -43,18 +68,19 @@ def add_paste_sheet(wb):
         "  「設定」シートの値を変更したら「設定変更後の再抽出」ボタンを押してください。",
         "  (PDFを読み直さずに、取り込み済みのデータから①②を作り直します)",
         "",
-        "※ ボタンが表示されていない場合は、Alt+F8 →「初期設定」を実行してください。",
+        "※ .xlsm で保存し直さずに閉じると、インポートしたマクロは消えてしまいます。",
         "※ OneDrive上に保存していると「貼り付けたPDFの取込」が使えない場合があります。",
         "   その場合はローカル(デスクトップ等)に保存するか、使い方1をご利用ください。",
     ]
     for i, s in enumerate(steps):
-        c = ws.cell(row=9 + i, column=2, value=s)
+        c = ws.cell(row=23 + i, column=2, value=s)
         c.font = Font(name=FONT_NAME, size=10,
                       bold=s.startswith("【"))
-    note = ws.cell(row=4, column=2,
-                   value="ボタンは初回に Alt+F8 →「初期設定」を実行すると設置されます。")
-    note.font = Font(name=FONT_NAME, size=10, color="C00000")
-    area = ws.cell(row=32, column=2, value="▼ この下にPDFを貼り付けてください ▼")
+
+    btn = ws.cell(row=19, column=2,
+                  value="▼ セットアップ後、ここにボタンが表示されます ▼")
+    btn.font = Font(name=FONT_NAME, size=10, color="808080")
+    area = ws.cell(row=44, column=2, value="▼ この下にPDFを貼り付けてください ▼")
     area.font = Font(name=FONT_NAME, size=11, bold=True, color="1F4E79")
 
 

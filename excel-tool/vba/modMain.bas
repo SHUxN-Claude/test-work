@@ -22,16 +22,28 @@ Public Const COL_LAST As Long = 12
 
 '--- 初回に1回だけ実行: PDF貼付シートにボタンを設置する ---
 Public Sub 初期設定()
+    ' .xlsx のまま保存するとマクロが失われるため、先に形式を確認する
+    If LCase(Right(ThisWorkbook.Name, 5)) <> ".xlsm" Then
+        If MsgBox("このブックがマクロ有効ブック(.xlsm)として保存されていません。" & vbCrLf & _
+                  "このまま保存するとマクロが消えてしまいます。" & vbCrLf & vbCrLf & _
+                  "F12(名前を付けて保存)で、ファイルの種類を" & vbCrLf & _
+                  "「Excel マクロ有効ブック (*.xlsm)」にして保存してください。" & vbCrLf & vbCrLf & _
+                  "このまま続けますか?", vbYesNo + vbExclamation) = vbNo Then Exit Sub
+    End If
+
     Dim ws As Worksheet
     Set ws = ThisWorkbook.Worksheets(SHEET_PASTE)
     Dim b As Object
     For Each b In ws.Buttons
         b.Delete
     Next
-    AddBtn ws, 20, 85, 230, 32, "PDFファイルを選択して取込", "PDFファイル選択取込"
-    AddBtn ws, 265, 85, 230, 32, "貼り付けたPDFを取り込む", "貼付PDF取込"
-    AddBtn ws, 510, 85, 190, 32, "設定変更後の再抽出", "再抽出"
-    MsgBox "ボタンを設置しました。", vbInformation
+    ' 位置はPDF貼付シートの「▼ ここにボタンが表示されます ▼」の直下(20～21行目)
+    AddBtn ws, 20, 285, 230, 32, "PDFファイルを選択して取込", "PDFファイル選択取込"
+    AddBtn ws, 265, 285, 230, 32, "貼り付けたPDFを取り込む", "貼付PDF取込"
+    AddBtn ws, 510, 285, 190, 32, "設定変更後の再抽出", "再抽出"
+    ws.Activate
+    MsgBox "ボタンを設置しました。" & vbCrLf & vbCrLf & _
+           "「PDF貼付」シートの中ほどにボタンが3つ表示されています。", vbInformation
 End Sub
 
 Private Sub AddBtn(ws As Worksheet, l As Single, t As Single, _
