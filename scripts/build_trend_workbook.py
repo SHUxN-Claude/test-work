@@ -52,11 +52,12 @@ DATA_HEADERS = ["NO", "列車速度\n(km/h)", "時刻\n(H:M:S)", "キロ程\n(km
 DATA_WIDTHS = [6, 10, 10, 10, 9, 9, 7, 18, 12, 8, 16, 24, 7]
 
 TREND_HEADERS = (["箇所No", "線別", "区分", "代表キロ程\n(km)",
-                  "範囲(自)", "範囲(至)", "備考"]
+                  "範囲(自)", "範囲(至)", "備考\n(PDF自動)", "メモ\n(手入力)"]
                  + MONTH_LABELS
                  + ["年間最大", "前年度値", "施工日", "施工内容"])
-TREND_WIDTHS = [7, 7, 8, 11, 9, 9, 16] + [7] * 12 + [8, 8, 11, 24]
-TREND_MONTH_COL0 = 8          # H列 = 4月
+TREND_WIDTHS = [7, 7, 8, 11, 9, 9, 14, 18] + [7] * 12 + [8, 8, 11, 24]
+COL_MEMO = 8                  # H列 = メモ(手入力)
+TREND_MONTH_COL0 = 9          # I列 = 4月
 
 
 def fiscal_index(month):
@@ -201,14 +202,19 @@ def build_trend_sheet(ws):
          "「−」は取込済みの月にその箇所の検出がなかった(=0.15G未満に収まっていた)ことを表します。",
          color="1F4E79")
     note(ws, 3, 1, "※ 箇所Noは再計算のたびにキロ程順で振り直します。"
-         "施工の記録は「施工記録」シートに入力してください(再計算で自動でひも付きます)。",
+         "「メモ」列は直接入力できます(再計算しても消えません)。"
+         "施工の記録は「施工記録」シートへ。",
          color="808080", size=9)
-    first = get_column_letter(TREND_MONTH_COL0) + str(DATA_START)          # H5
-    last = get_column_letter(TREND_MONTH_COL0 + 13) + str(CF_LAST)         # U6000
+    first = get_column_letter(TREND_MONTH_COL0) + str(DATA_START)          # I5
+    last = get_column_letter(TREND_MONTH_COL0 + 13) + str(CF_LAST)         # V6000
     add_value_cf(ws, f"{first}:{last}", first)
     for col in ("D", "E", "F"):
         for r in range(DATA_START, CF_LAST + 1):
             ws[f"{col}{r}"].number_format = "0.000"
+    # メモ列は手入力欄と分かるよう色を付けておく
+    memo_col = get_column_letter(COL_MEMO)
+    for r in range(DATA_START, CF_LAST + 1):
+        ws[f"{memo_col}{r}"].fill = INPUT_FILL
 
 
 def build_repair_sheet(ws):
@@ -233,6 +239,35 @@ def build_repair_sheet(ws):
             ws.cell(row=r, column=col).fill = INPUT_FILL
         ws.cell(row=r, column=3).number_format = "0.000"
         ws.cell(row=r, column=4).number_format = "yyyy/mm/dd"
+
+
+def build_memo_sheet(ws):
+    """手入力メモの保管シート。
+
+    推移表の「メモ」列に直接入力された内容は、再計算の直前にこのシートへ
+    退避され(線別+キロ程で記録)、再計算後に位置の突き合わせで貼り直される。
+    このシートに直接書いてもよい。
+    """
+    ws.column_dimensions["A"].width = 3
+    headers = ["線別", "キロ程(km)", "メモ"]
+    widths = [8, 12, 46]
+    for i, (h, w) in enumerate(zip(headers, widths), start=2):
+        c = ws.cell(row=4, column=i, value=h)
+        c.font = Font(name=FONT, bold=True, size=10)
+        c.fill = HEADER_FILL
+        c.border = BORDER
+        c.alignment = Alignment(horizontal="center")
+        ws.column_dimensions[get_column_letter(i)].width = w
+    note(ws, 1, 2, "■ 箇所メモ(手入力の保管場所)", bold=True, size=12)
+    note(ws, 2, 2, "推移表の「メモ」列に入力した内容は、再計算のたびにここへ自動保存され、"
+         "計算後に同じ位置へ貼り直されます。ここに直接書いても構いません。")
+    note(ws, 3, 2, "入力例: 下線 / 74.212 / 巌Ｔ 出口の継目部 "
+         "(この行は例です。実際の入力は5行目から)", color="808080", size=9)
+    for r in range(5, 405):
+        for col in range(2, 5):
+            ws.cell(row=r, column=col).border = BORDER
+            ws.cell(row=r, column=col).fill = INPUT_FILL
+        ws.cell(row=r, column=3).number_format = "0.000"
 
 
 def build_history_sheet(ws):
@@ -338,6 +373,7 @@ def build_book():
         wb.create_sheet("②目標値超過"),
         '="抽出条件： 目標値("&TEXT(目標値,"0.00")&"G)以上〜基準値("&TEXT(基準値,"0.00")'
         '&"G)未満(全月分)　※ "&TEXT(黄色強調値,"0.00")&"G以上は黄色"')
+    build_memo_sheet(wb.create_sheet("箇所メモ"))
     build_repair_sheet(wb.create_sheet("施工記録"))
     build_history_sheet(wb.create_sheet("取込履歴"))
     build_prev_sheet(wb.create_sheet("前年度実績"))
@@ -372,9 +408,32 @@ def group_points(points, tol_km):
 
 
 # ---------------------------------------------------------------- 書き出し
-def write_trend(wb, clusters, imported, tol, repairs):
-    """推移表を書き出す。imported に含まれる月で検出がない箇所は「−」。"""
+def match_at(items, line, lo, hi, tol):
+    """線別が一致し、キロ程が [lo-tol, hi+tol] に入る項目を拾う。"""
+    return [it for it in items
+            if it[0] == line and lo - tol <= it[1] <= hi + tol]
+
+
+def write_memo_sheet(wb, memos):
+    """箇所メモシートへ書き出す(線別・キロ程・メモ)。"""
+    ws = wb["箇所メモ"]
+    for i, (line, km, text) in enumerate(memos):
+        r = 5 + i
+        for col, v in enumerate((line, km, text), start=2):
+            c = ws.cell(row=r, column=col, value=v)
+            c.font = Font(name=FONT, size=10)
+
+
+def write_trend(wb, clusters, imported, tol, repairs, memos=()):
+    """推移表を書き出す。imported に含まれる月で検出がない箇所は「−」。
+
+    memos: (線別, キロ程, メモ) の一覧。位置が箇所の範囲に入るものを
+    「メモ(手入力)」列へ貼り直す。グループの併合で複数該当した場合は
+    どれも失われないよう「 / 」でつなぐ。
+    """
     ws = wb["推移表"]
+    month_end = get_column_letter(TREND_MONTH_COL0 + 11)
+    month_start = get_column_letter(TREND_MONTH_COL0)
     for i, cl in enumerate(clusters):
         r = DATA_START + i
         lo, hi = cl["kms"][0], cl["kms"][-1]
@@ -382,18 +441,24 @@ def write_trend(wb, clusters, imported, tol, repairs):
         for line, km, d, txt in repairs:
             if line == cl["line"] and lo - tol <= km <= hi + tol:
                 rep_d, rep_txt = d, txt
-        vals = [i + 1, cl["line"], cl["kind"], cl["rep"], lo, hi, cl["biko"]]
+        hit = match_at(memos, cl["line"], lo, hi, tol)
+        memo = " / ".join(dict.fromkeys(m[2] for m in hit if m[2]))
+        vals = [i + 1, cl["line"], cl["kind"], cl["rep"], lo, hi,
+                cl["biko"], memo]
         vals += [cl["months"].get(mi, "−" if mi in imported else None)
                  for mi in range(1, 13)]
-        vals += [f"=MAX(H{r}:S{r})", None, rep_d, rep_txt]
+        vals += [f"=MAX({month_start}{r}:{month_end}{r})", None,
+                 rep_d, rep_txt]
         for col, v in enumerate(vals, start=1):
             c = ws.cell(row=r, column=col, value=v)
             c.font = Font(name=FONT, size=10)
             c.border = BORDER
-            if col in (1, 2, 3, 7) or 8 <= col <= 19:
+            if col in (1, 2, 3) or TREND_MONTH_COL0 <= col < TREND_MONTH_COL0 + 12:
                 c.alignment = Alignment(horizontal="center")
-            if 8 <= col <= 21:
+            if TREND_MONTH_COL0 <= col <= TREND_MONTH_COL0 + 13:
                 c.number_format = "0.00"
+            if col == COL_MEMO:
+                c.fill = INPUT_FILL
 
 
 def write_chart_data(wb, clusters, imported, target, limit, selected=None):
@@ -544,7 +609,11 @@ def fill_demo(wb, pdf_path):
     clusters = group_points(points, tol)
     imported = sorted(months)
     repairs = [("下線", 105.390, "2026/06/15", "むら直し施工")]
-    write_trend(wb, clusters, imported, tol, repairs)
+    # 手入力メモの例(PDFに備考がない箇所へ後から書き足したという想定)
+    memos = [("下線", 105.390, "継目部 要注意"),
+             ("下線", 120.400, "踏切前後")]
+    write_memo_sheet(wb, memos)
+    write_trend(wb, clusters, imported, tol, repairs, memos)
 
     story_no = next(i + 1 for i, c in enumerate(clusters)
                     if abs(c["rep"] - 105.385) < 0.02 and c["kind"] == "上下動")
@@ -554,7 +623,59 @@ def fill_demo(wb, pdf_path):
           f"(4月0.20→5月0.22→6月{story['months'].get(3)}→7月{story['months'].get(4)})")
 
 
-def fill_from_pdfs(wb, specs, tol_m, target, limit):
+def read_carry(path, tol_m=20):
+    """既存ブックから手入力分(メモ・施工記録)を読み出す。
+
+    メモは「箇所メモ」シートを正本とし、推移表の「メモ」列からは
+    **まだ箇所メモに無いもの(=推移表に直接入力された新しいメモ)だけ**を拾う。
+    自動表示されたメモをそのまま拾い直すと、再計算のたびに記録位置が
+    増えていき(メモの増殖)、やがて無関係な箇所まで巻き込むため。
+    """
+    from openpyxl import load_workbook
+    tol = tol_m / 1000.0
+    wb = load_workbook(path, data_only=True)
+    memos, repairs = [], []
+    if "箇所メモ" in wb.sheetnames:
+        for row in wb["箇所メモ"].iter_rows(min_row=5, min_col=2, max_col=4,
+                                            values_only=True):
+            line, km, text = row
+            if line and km is not None and text:
+                memos.append((str(line), float(km), str(text)))
+    memos = list(dict.fromkeys(memos))
+    stored = len(memos)
+
+    if "推移表" in wb.sheetnames:
+        for row in wb["推移表"].iter_rows(min_row=DATA_START, max_col=COL_MEMO,
+                                          values_only=True):
+            if not row[0]:
+                break
+            line, km, text = row[1], row[3], row[COL_MEMO - 1]
+            if not (line and km is not None and text):
+                continue
+            line, km, text = str(line), float(km), str(text)
+            # 自動表示された分は「 / 」で連結されている場合があるので分解
+            for part in (t.strip() for t in text.split("/")):
+                if not part:
+                    continue
+                known = any(m[0] == line and m[2] == part
+                            and abs(m[1] - km) <= tol for m in memos)
+                if not known:
+                    memos.append((line, km, part))
+
+    if "施工記録" in wb.sheetnames:
+        for row in wb["施工記録"].iter_rows(min_row=5, min_col=2, max_col=5,
+                                            values_only=True):
+            line, km, date, txt = row
+            if line and km is not None:
+                repairs.append((str(line), float(km), date, txt or ""))
+    repairs = list(dict.fromkeys(repairs))
+    print(f"引き継ぎ: メモ{len(memos)}件"
+          f"(保管{stored} + 推移表から新規{len(memos) - stored}) "
+          f"/ 施工記録{len(repairs)}件")
+    return memos, repairs
+
+
+def fill_from_pdfs(wb, specs, tol_m, target, limit, memos=(), repairs=()):
     """specs: [(月番号1-12, PDFパス), ...] を取り込んで推移表・グラフまで作る。"""
     tol = tol_m / 1000.0
     months, metas = {}, {}
@@ -594,8 +715,15 @@ def fill_from_pdfs(wb, specs, tol_m, target, limit):
             c.border = BORDER
             c.font = Font(name=FONT, size=10)
 
+    ws = wb["施工記録"]
+    for i, (line, km, date, txt) in enumerate(repairs):
+        for col, v in enumerate((line, km, date, txt), start=2):
+            c = ws.cell(row=5 + i, column=col, value=v)
+            c.font = Font(name=FONT, size=10)
+
     clusters = group_points(points, tol)
-    write_trend(wb, clusters, sorted(months), tol, [])
+    write_memo_sheet(wb, memos)
+    write_trend(wb, clusters, sorted(months), tol, repairs, memos)
     write_chart_data(wb, clusters, sorted(months), target, limit,
                      selected=1 if clusters else None)
     print(f"推移表: {len(clusters)}箇所")
@@ -613,6 +741,8 @@ def main():
                     help="同一箇所とみなす距離(m) 既定20")
     ap.add_argument("--target", type=float, default=0.20, help="目標値")
     ap.add_argument("--limit", type=float, default=0.25, help="基準値")
+    ap.add_argument("--carry", metavar="既存.xlsx",
+                    help="既存ブックの手入力分(メモ・施工記録)を引き継ぐ")
     ap.add_argument("--demo", metavar="PDF",
                     help="実PDFを6月分として疑似データ入りデモを生成")
     args = ap.parse_args()
@@ -621,11 +751,14 @@ def main():
     if args.demo:
         fill_demo(wb, args.demo)
     elif args.pdf:
+        memos, repairs = (read_carry(args.carry, args.tol)
+                          if args.carry else ([], []))
         specs = []
         for s in args.pdf:
             month, _, path = s.partition(":")
             specs.append((fiscal_index(int(month)), path))
-        fill_from_pdfs(wb, specs, args.tol, args.target, args.limit)
+        fill_from_pdfs(wb, specs, args.tol, args.target, args.limit,
+                       memos, repairs)
         wb["設定"]["C6"] = args.tol
         wb["設定"]["C3"] = args.target
         wb["設定"]["C4"] = args.limit
