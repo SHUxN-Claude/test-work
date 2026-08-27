@@ -10,7 +10,7 @@
 | 推移管理ブックの生成(`scripts/build_trend_workbook.py`) | **完成**。実PDFから推移表・グラフまで生成できる |
 | 推移管理テンプレート(`trend-tool/`) | **完成**(シート・条件付き書式・グラフの骨組み) |
 | デモ(`sample/デモ_推移管理_2026年度.xlsx`) | **完成**。4〜7月の推移が入った実物 |
-| 推移管理ツールのVBA(`modTrend.bas`) | **未着手** ← 残作業 |
+| 推移管理ツールのVBA(`modTrend.bas`) | **実装済**(取込/再計算/グラフ更新/新年度開始)。実機未検証 |
 
 Python経路は今日から実用できます:
 
@@ -19,13 +19,16 @@ python scripts/build_trend_workbook.py -o 2026年度.xlsx \
   --pdf 4:4月.pdf --pdf 5:5月.pdf --pdf 6:6月.pdf --tol 20
 ```
 
-## 残作業: `modTrend.bas` の実装
+## `modTrend.bas` の設計メモ(実装済み・保守用)
 
 `excel-tool/vba/` の3本(modMain / modEngine / modEmbedded)はそのまま流用できます。
 modEngine の `ParsePdf` がPDF1枚を12列の行データに変換するので、
 推移管理ブック用には **13列目に「月」ラベル** を足して「全データ」へ追記する形になります。
 
-実装すべきマクロは4本:
+実装済みのマクロは4本。以下は保守時の参照用です。
+なお **`modMain.bas`(単月ツール用)は推移ツールに入れてはいけません** —
+`初期設定` などマクロ名が重複してコンパイルエラーになります。
+推移ツールは `modTrend` / `modEngine` / `modEmbedded` の3本構成です。
 
 ### 1. `月次取込(paths)`
 - `ParsePdf` で読み、測定日から年度内月番号(4月=1〜3月=12)を決める
