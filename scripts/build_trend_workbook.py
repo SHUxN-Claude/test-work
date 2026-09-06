@@ -2,21 +2,24 @@
 # -*- coding: utf-8 -*-
 """年度推移管理ツール(動揺データ)のExcelブックを生成する。
 
-4月〜翌3月を1年度として毎月の検査PDFを取り込み、
-同一箇所(キロ程が設定距離以内)ごとの月別推移を管理するブック。
+4月〜翌3月を1年度として検査PDFを取り込み、
+同一箇所(キロ程が設定距離以内)ごとの推移を管理するブック。
+推移表の列は「月」ではなく**検査日**ごとなので、
+検査が飛んだ月があっても、同じ月に2回検査しても正しく並ぶ。
 
   設定       … 目標値/基準値/黄色強調値/同一箇所とみなす距離/年度
   PDF貼付    … 取込ボタン(VBA)
-  推移表     … 箇所ごとの月別推移(4月〜3月) + 施工記録・前年度値
+  推移表     … 箇所ごとの検査日別推移 + 施工記録・前年度値
   グラフ     … 箇所選択式の折れ線 + ワースト5
-  全データ   … 取り込んだ全行(月列付き)
-  ①基準値超過/②目標値超過 … 月をまたいだ抽出一覧
+  全データ   … 取り込んだ全行(検査日列付き)
+  ①基準値超過/②目標値超過 … 全検査分の抽出一覧
   施工記録   … 線別+キロ程で施工を記録(手入力)
-  取込履歴   … 月別の取込状況
+  取込履歴   … 検査ごとの取込状況
   前年度実績 … 新年度開始時に前年度の推移表を退避
 
 使い方:
   python build_trend_workbook.py -o テンプレート.xlsx          # 空のテンプレート
+  python build_trend_workbook.py --pdf 4月.pdf --pdf 5月.pdf -o 年度.xlsx
   python build_trend_workbook.py --demo 実PDF.pdf -o デモ.xlsx # 疑似データ入りデモ
 """
 import argparse
@@ -32,6 +35,37 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 from pdf_to_excel import parse_pdf
 
+
+def parse_source(path):
+    """PDF、または既に取り込み済みのブックから行データを読む。
+
+    元のPDFが手元になくても、出力済みブックの「全データ」から
+    作り直せるようにしてある。戻り値は parse_pdf と同じ形。
+    """
+    if not str(path).lower().endswith((".xlsx", ".xlsm")):
+        return parse_pdf(path)
+
+    from openpyxl import load_workbook
+    wb = load_workbook(path, data_only=True)
+    ws = wb["全データ"]
+    meta = {"title": "", "center": "", "line": "", "date": "", "file": str(path)}
+    rows = []
+    for row in ws.iter_rows(min_row=DATA_START, max_col=13, values_only=True):
+        if row[0] is None or row[3] is None:
+            continue
+        if not meta["date"]:
+            meta.update(date=str(row[8] or ""), line=str(row[9] or ""),
+                        center=str(row[10] or ""), file=str(row[11] or path))
+        ud, sa = row[4], row[5]
+        rows.append(dict(no=int(row[0]), speed=float(row[1] or 0),
+                         time=str(row[2] or ""), km=float(row[3]),
+                         ud=float(ud) if ud is not None else None,
+                         ud_star=(ud is not None and float(ud) >= 0.25),
+                         sa=float(sa) if sa is not None else None,
+                         sa_star=(sa is not None and float(sa) >= 0.25),
+                         biko=str(row[7] or "")))
+    return meta, rows
+
 FONT = "游ゴシック"
 THIN = Side(style="thin", color="999999")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
@@ -45,24 +79,41 @@ DATA_START = 5
 CF_LAST = 6000
 MONTH_LABELS = ["4月", "5月", "6月", "7月", "8月", "9月",
                 "10月", "11月", "12月", "1月", "2月", "3月"]
+MAX_INSP = 24          # 1年度に取り込める検査の最大回数(月2回以上に対応)
 
 DATA_HEADERS = ["NO", "列車速度\n(km/h)", "時刻\n(H:M:S)", "キロ程\n(km)",
                 "上下動\n(G)", "左右動\n(G)", "超過印", "備考",
-                "測定日", "線別", "保線技術センター", "元ファイル", "月"]
+                "測定日", "線別", "保線技術センター", "元ファイル", "検査日"]
 DATA_WIDTHS = [6, 10, 10, 10, 9, 9, 7, 18, 12, 8, 16, 24, 7]
 
 TREND_HEADERS = (["箇所No", "線別", "区分", "代表キロ程\n(km)",
                   "範囲(自)", "範囲(至)", "備考\n(PDF自動)", "メモ\n(手入力)"]
-                 + MONTH_LABELS
+                 + [f"第{i}回" for i in range(1, MAX_INSP + 1)]
                  + ["年間最大", "前年度値", "施工日", "施工内容"])
-TREND_WIDTHS = [7, 7, 8, 11, 9, 9, 14, 18] + [7] * 12 + [8, 8, 11, 24]
+TREND_WIDTHS = ([7, 7, 8, 11, 9, 9, 14, 18] + [7] * MAX_INSP
+                + [8, 8, 11, 24])
 COL_MEMO = 8                  # H列 = メモ(手入力)
-TREND_MONTH_COL0 = 9          # I列 = 4月
+TREND_INSP_COL0 = 9           # I列 = 第1回(検査日ごとに1列)
+COL_YMAX = TREND_INSP_COL0 + MAX_INSP          # 年間最大
+COL_PREV = COL_YMAX + 1                        # 前年度値
+COL_REPAIR_D = COL_YMAX + 2                    # 施工日
+COL_REPAIR_T = COL_YMAX + 3                    # 施工内容
+TREND_COLS = COL_YMAX + 3
 
 
-def fiscal_index(month):
-    """暦月(1-12) → 年度内の月番号(4月=1 … 3月=12)"""
-    return (month - 4) % 12 + 1
+def fiscal_key(date_str):
+    """測定日文字列 → (年度内の並び順キー, 表示ラベル)。
+
+    「2026/06/04」→ (ソート用の日付, "6/4")。
+    月ではなく検査日で1列を割り当てるため、同じ月に2回検査があっても
+    どちらも失われない。
+    """
+    s = str(date_str).replace("-", "/").replace(".", "/")
+    parts = [p for p in s.split("/") if p.strip().isdigit()]
+    if len(parts) < 3:
+        return None, str(date_str)
+    y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
+    return (y, m, d), f"{m}/{d}"
 
 
 def header_row(ws, headers, widths, row=4):
@@ -125,6 +176,8 @@ def build_settings(ws):
         "【例】 目標値0.25/基準値0.30の職場 → 0.25 / 0.30 / 0.29 に変更",
         "",
         "※ 値を変更したら「PDF貼付」シートの「再計算」ボタンを押してください。",
+        "※ 推移表の列は「月」ではなく「検査日」ごとです。検査が飛んだ月があっても、",
+        "   同じ月に2回検査しても、そのまま並びます(最大24回まで)。",
         "※ 「同一箇所とみなす距離」を変えると、4月以降の全データを新しい距離で",
         "   グループ分けし直します(過去の月も含めて再計算されます)。",
         "   距離を大きくすると、それまで別々だった箇所が1つにまとまることがあります。",
@@ -162,11 +215,12 @@ def build_paste(ws):
         note(ws, 9 + i, 2, s, bold=s.startswith("【"))
     note(ws, 19, 2, "▼ セットアップ後、ここにボタンが表示されます ▼", color="808080")
     steps = [
-        "【毎月の使い方】",
-        "  1. 「PDFファイルを選択して取込」ボタンで、その月のPDFを選ぶ",
+        "【検査のたびの使い方】",
+        "  1. 「PDFファイルを選択して取込」ボタンで、その回のPDFを選ぶ(複数まとめて選択可)",
         "     (またはこのシートの下にPDFを貼り付けて保存 →「貼り付けたPDFを取り込む」)",
         "  2. 「全データ」に追加され、「推移表」「グラフ」「①②」が自動で更新されます",
-        "  3. 同じ月のPDFを取り込み直すと、その月の分だけ入れ替わります(二重計上しません)",
+        "  3. 検査日ごとに1列なので、同じ月に2回検査(例 5/14と5/26)しても両方残ります",
+        "  4. 同じ検査日のPDFを取り込み直すと、その分だけ入れ替わります(二重計上しません)",
         "",
         "【設定を変えたとき】 「再計算」ボタンを押してください(PDFは読み直しません)",
         "【施工したとき】 「施工記録」シートに線別・キロ程・施工日・内容を入力し「再計算」",
@@ -199,15 +253,16 @@ def build_data_sheet(ws, note_formula):
 
 def build_trend_sheet(ws):
     header_row(ws, TREND_HEADERS, TREND_WIDTHS)
-    note(ws, 2, 1, "箇所ごとの月別推移(値はその箇所・その月の最大値)。"
-         "「−」は取込済みの月にその箇所の検出がなかった(=0.15G未満に収まっていた)ことを表します。",
+    note(ws, 2, 1, "箇所ごとの検査日ごとの推移(値はその箇所・その検査の最大値)。"
+         "見出しは取り込んだ検査日(例 5/14)になります。"
+         "「−」はその検査でその箇所の検出がなかった(=0.15G未満に収まっていた)ことを表します。",
          color="1F4E79")
-    note(ws, 3, 1, "※ 箇所Noは再計算のたびにキロ程順で振り直します。"
-         "「メモ」列は直接入力できます(再計算しても消えません)。"
-         "施工の記録は「施工記録」シートへ。",
+    note(ws, 3, 1, "※ 検査日ごとに1列なので、同じ月に2回検査があっても両方残ります。"
+         "箇所Noは再計算のたびにキロ程順で振り直します。"
+         "「メモ」列は直接入力できます(再計算しても消えません)。",
          color="808080", size=9)
-    first = get_column_letter(TREND_MONTH_COL0) + str(DATA_START)          # I5
-    last = get_column_letter(TREND_MONTH_COL0 + 13) + str(CF_LAST)         # V6000
+    first = get_column_letter(TREND_INSP_COL0) + str(DATA_START)
+    last = get_column_letter(COL_PREV) + str(CF_LAST)
     add_value_cf(ws, f"{first}:{last}", first)
     for col in ("D", "E", "F"):
         for r in range(DATA_START, CF_LAST + 1):
@@ -273,7 +328,7 @@ def build_memo_sheet(ws):
 
 def build_history_sheet(ws):
     ws.column_dimensions["A"].width = 3
-    headers = ["月", "線別", "測定日", "元ファイル", "行数", "取込日時"]
+    headers = ["回", "線別", "測定日", "元ファイル", "行数", "取込日時"]
     widths = [7, 8, 12, 30, 8, 18]
     for i, (h, w) in enumerate(zip(headers, widths), start=2):
         c = ws.cell(row=4, column=i, value=h)
@@ -283,8 +338,8 @@ def build_history_sheet(ws):
         c.alignment = Alignment(horizontal="center")
         ws.column_dimensions[get_column_letter(i)].width = w
     note(ws, 1, 2, "■ 取込履歴(自動で記録されます)", bold=True, size=12)
-    note(ws, 2, 2, "取込済みの月にPDFへ載っていない箇所は「0.15G未満に収まっていた」と判断し、"
-         "推移表に「−」を表示します。")
+    note(ws, 2, 2, "取り込んだ検査にPDFへ載っていない箇所は「0.15G未満に収まっていた」と判断し、"
+         "推移表に「−」を表示します。同じ月に2回検査した場合も、検査日ごとに別の列になります。")
 
 
 def build_prev_sheet(ws):
@@ -317,12 +372,12 @@ def build_chart_sheet(ws):
          size=9, color="808080")
     note(ws, 38, 2, "▼ グラフ用データ(自動生成・編集不要)", size=9, color="808080")
 
-    # --- 系列ラベルと月見出し(値はVBA/デモが書き込む) ---
+    # --- 系列ラベルと検査日見出し(値はVBA/デモが書き込む) ---
     ws.cell(row=40, column=1, value="選択箇所")
-    ws.cell(row=50, column=1, value="ワースト5(最新月)")
-    for j, label in enumerate(MONTH_LABELS):
-        ws.cell(row=40, column=2 + j, value=label)
-        ws.cell(row=50, column=2 + j, value=label)
+    ws.cell(row=50, column=1, value="ワースト5(最新の検査)")
+    for j in range(MAX_INSP):
+        ws.cell(row=40, column=2 + j, value=f"第{j + 1}回")
+        ws.cell(row=50, column=2 + j, value=f"第{j + 1}回")
     ws.cell(row=41, column=1, value="(箇所を選んでください)")
     ws.cell(row=42, column=1, value="目標値")
     ws.cell(row=43, column=1, value="基準値")
@@ -334,18 +389,18 @@ def build_chart_sheet(ws):
     ch.title = "選択した箇所の推移"
     ch.y_axis.title = "全振幅(G)"
     ch.height, ch.width = 9, 17
-    ch.add_data(Reference(ws, min_col=1, max_col=13, min_row=41, max_row=43),
+    ch.add_data(Reference(ws, min_col=1, max_col=1 + MAX_INSP, min_row=41, max_row=43),
                 from_rows=True, titles_from_data=True)
-    ch.set_categories(Reference(ws, min_col=2, max_col=13, min_row=40))
+    ch.set_categories(Reference(ws, min_col=2, max_col=1 + MAX_INSP, min_row=40))
     ws.add_chart(ch, "B4")
 
     ch2 = LineChart()
-    ch2.title = "ワースト5(最新月)の推移"
+    ch2.title = "ワースト5(最新の検査)の推移"
     ch2.y_axis.title = "全振幅(G)"
     ch2.height, ch2.width = 9, 17
-    ch2.add_data(Reference(ws, min_col=1, max_col=13, min_row=51, max_row=56),
+    ch2.add_data(Reference(ws, min_col=1, max_col=1 + MAX_INSP, min_row=51, max_row=56),
                  from_rows=True, titles_from_data=True)
-    ch2.set_categories(Reference(ws, min_col=2, max_col=13, min_row=50))
+    ch2.set_categories(Reference(ws, min_col=2, max_col=1 + MAX_INSP, min_row=50))
     ws.add_chart(ch2, "B24")
 
     dv = DataValidation(type="list", formula1=f"=推移表!$A$5:$A${CF_LAST}",
@@ -383,7 +438,8 @@ def build_book():
 
 # ---------------------------------------------------------------- グループ化
 def group_points(points, tol_km):
-    """points: (line, kind, km, val, fiscal_idx, biko) のリスト。
+    """points: (line, kind, km, val, insp_idx, biko) のリスト。
+    insp_idx は検査日ごとの通し番号(1始まり)。
     線別・区分ごとにキロ程順で並べ、隣との差が tol_km 以内なら同一箇所に
     つなげる(鎖方式)。戻り値: クラスタのリスト。"""
     clusters = []
@@ -393,12 +449,12 @@ def group_points(points, tol_km):
         cur = None
         for p in pts:
             if cur is None or p[2] - cur["kms"][-1] > tol_km:
-                cur = {"line": p[0], "kind": p[1], "kms": [], "months": {},
+                cur = {"line": p[0], "kind": p[1], "kms": [], "insp": {},
                        "biko": "", "rep": None, "maxval": -1}
                 clusters.append(cur)
             cur["kms"].append(p[2])
-            mi = p[4]
-            cur["months"][mi] = max(cur["months"].get(mi, 0), p[3])
+            ii = p[4]
+            cur["insp"][ii] = max(cur["insp"].get(ii, 0), p[3])
             if p[3] > cur["maxval"]:
                 cur["maxval"] = p[3]
                 cur["rep"] = p[2]
@@ -425,16 +481,23 @@ def write_memo_sheet(wb, memos):
             c.font = Font(name=FONT, size=10)
 
 
-def write_trend(wb, clusters, imported, tol, repairs, memos=()):
-    """推移表を書き出す。imported に含まれる月で検出がない箇所は「−」。
+def write_trend(wb, clusters, inspections, tol, repairs, memos=()):
+    """推移表を書き出す。
 
+    inspections: 検査日ラベルの一覧(古い順)。1件=1列に対応し、
+    その検査で検出がなかった箇所には「−」を入れる。
     memos: (線別, キロ程, メモ) の一覧。位置が箇所の範囲に入るものを
     「メモ(手入力)」列へ貼り直す。グループの併合で複数該当した場合は
     どれも失われないよう「 / 」でつなぐ。
     """
     ws = wb["推移表"]
-    month_end = get_column_letter(TREND_MONTH_COL0 + 11)
-    month_start = get_column_letter(TREND_MONTH_COL0)
+    n_insp = len(inspections)
+    # 見出しを実際の検査日に置き換える(未使用の列は「第n回」のまま)
+    for j in range(MAX_INSP):
+        c = ws.cell(row=4, column=TREND_INSP_COL0 + j)
+        c.value = inspections[j] if j < n_insp else f"第{j + 1}回"
+    ins_start = get_column_letter(TREND_INSP_COL0)
+    ins_end = get_column_letter(TREND_INSP_COL0 + MAX_INSP - 1)
     for i, cl in enumerate(clusters):
         r = DATA_START + i
         lo, hi = cl["kms"][0], cl["kms"][-1]
@@ -446,42 +509,50 @@ def write_trend(wb, clusters, imported, tol, repairs, memos=()):
         memo = " / ".join(dict.fromkeys(m[2] for m in hit if m[2]))
         vals = [i + 1, cl["line"], cl["kind"], cl["rep"], lo, hi,
                 cl["biko"], memo]
-        vals += [cl["months"].get(mi, "−" if mi in imported else None)
-                 for mi in range(1, 13)]
-        vals += [f"=MAX({month_start}{r}:{month_end}{r})", None,
-                 rep_d, rep_txt]
+        vals += [cl["insp"].get(j + 1, "−") if j < n_insp else None
+                 for j in range(MAX_INSP)]
+        vals += [f"=MAX({ins_start}{r}:{ins_end}{r})", None, rep_d, rep_txt]
         for col, v in enumerate(vals, start=1):
             c = ws.cell(row=r, column=col, value=v)
             c.font = Font(name=FONT, size=10)
             c.border = BORDER
-            if col in (1, 2, 3) or TREND_MONTH_COL0 <= col < TREND_MONTH_COL0 + 12:
+            if col in (1, 2, 3) or TREND_INSP_COL0 <= col < COL_YMAX:
                 c.alignment = Alignment(horizontal="center")
-            if TREND_MONTH_COL0 <= col <= TREND_MONTH_COL0 + 13:
+            if TREND_INSP_COL0 <= col <= COL_PREV:
                 c.number_format = "0.00"
             if col == COL_MEMO:
                 c.fill = INPUT_FILL
 
 
-def write_chart_data(wb, clusters, imported, target, limit, selected=None):
+def write_chart_data(wb, clusters, inspections, target, limit, selected=None):
     """グラフが参照する固定行(40〜43 / 50〜56)に値を書き込む。"""
     ws = wb["グラフ"]
-    if not clusters or not imported:
+    n = len(inspections)
+    if not clusters or n == 0:
         return
     if selected is None or not (1 <= selected <= len(clusters)):
         selected = 1
     ws.cell(row=2, column=3, value=selected)
 
+    for j in range(MAX_INSP):
+        lbl = inspections[j] if j < n else None
+        ws.cell(row=40, column=2 + j, value=lbl)
+        ws.cell(row=50, column=2 + j, value=lbl)
+
     cl = clusters[selected - 1]
     ws.cell(row=CHART_SEL_ROW, column=1,
             value=f"No{selected} {cl['line']} {cl['rep']:.3f}({cl['kind']})")
-    for j in range(12):
-        ws.cell(row=CHART_SEL_ROW, column=2 + j, value=cl["months"].get(j + 1))
-        ws.cell(row=CHART_SEL_ROW + 1, column=2 + j, value=target)
-        ws.cell(row=CHART_SEL_ROW + 2, column=2 + j, value=limit)
+    for j in range(MAX_INSP):
+        ws.cell(row=CHART_SEL_ROW, column=2 + j,
+                value=cl["insp"].get(j + 1) if j < n else None)
+        ws.cell(row=CHART_SEL_ROW + 1, column=2 + j,
+                value=target if j < n else None)
+        ws.cell(row=CHART_SEL_ROW + 2, column=2 + j,
+                value=limit if j < n else None)
 
-    latest = imported[-1]
-    top = sorted([c for c in clusters if latest in c["months"]],
-                 key=lambda c: c["months"][latest], reverse=True)[:5]
+    latest = n            # 最新の検査 = 最後の列
+    top = sorted([c for c in clusters if latest in c["insp"]],
+                 key=lambda c: c["insp"][latest], reverse=True)[:5]
     for k in range(5):
         r = CHART_WORST_ROW + k
         if k < len(top):
@@ -489,12 +560,16 @@ def write_chart_data(wb, clusters, imported, target, limit, selected=None):
             no = clusters.index(c) + 1
             ws.cell(row=r, column=1,
                     value=f"No{no} {c['rep']:.3f}({c['kind']})")
-            for j in range(12):
-                ws.cell(row=r, column=2 + j, value=c["months"].get(j + 1))
+            for j in range(MAX_INSP):
+                ws.cell(row=r, column=2 + j,
+                        value=c["insp"].get(j + 1) if j < n else None)
         else:
             ws.cell(row=r, column=1, value=f"(ワースト{k + 1})")
-    for j in range(12):
-        ws.cell(row=CHART_WORST_ROW + 5, column=2 + j, value=limit)
+            for j in range(MAX_INSP):
+                ws.cell(row=r, column=2 + j, value=None)
+    for j in range(MAX_INSP):
+        ws.cell(row=CHART_WORST_ROW + 5, column=2 + j,
+                value=limit if j < n else None)
 
 
 # ---------------------------------------------------------------- デモ
@@ -534,12 +609,12 @@ def synth_month(base_rows, keep, jitter, scale, seed, exclude=(), extra=()):
 
 def write_data_rows(ws, entries):
     r = DATA_START
-    for month_label, meta, row in entries:
+    for insp_label, meta, row in entries:
         vals = [row["no"], row["speed"], row["time"], row["km"],
                 row["ud"], row["sa"],
                 "*" if (row["ud_star"] or row["sa_star"]) else "",
                 row["biko"], meta["date"], meta["line"], meta["center"],
-                meta["file"], month_label]
+                meta["file"], insp_label]
         for i, v in enumerate(vals, start=1):
             c = ws.cell(row=r, column=i, value=v)
             c.font = Font(name=FONT, size=10)
@@ -550,32 +625,40 @@ def write_data_rows(ws, entries):
 
 
 def fill_demo(wb, pdf_path):
-    meta, june = parse_pdf(pdf_path)
+    """実PDF(6/4)を軸に、前後の検査を疑似生成したデモを作る。
+
+    5月に2回(5/14・5/26)検査した例を入れて、同じ月に複数回の検査が
+    あってもどちらも残ることを示す。
+    """
+    meta, june = parse_source(pdf_path)
     story = [(105.380, 105.400)]                      # 悪化→施工→改善の物語箇所
-    months = {
-        3: [dict(r) for r in june],                                     # 6月(実データ)
-        1: synth_month(june, 0.55, 0.008, 0.93, 41, exclude=story,
-                       extra=[(105.390, "ud", 0.20, "")]),              # 4月
-        2: synth_month(june, 0.65, 0.008, 0.97, 42, exclude=story,
-                       extra=[(105.393, "ud", 0.22, "")]),              # 5月
-        4: synth_month(june, 0.70, 0.008, 0.90, 43, exclude=story,
-                       extra=[(105.388, "ud", 0.16, "")]),              # 7月
-    }
-    metas = {
-        1: dict(meta, date="2026/04/03", file="(デモ疑似データ)4月.pdf"),
-        2: dict(meta, date="2026/05/08", file="(デモ疑似データ)5月.pdf"),
-        3: dict(meta, date="2026/06/04",
-                file="(実データ)202603_2026.06.04.pdf"),
-        4: dict(meta, date="2026/07/02", file="(デモ疑似データ)7月.pdf"),
-    }
+    # (測定日, ファイル名, 行データ)を古い順に並べる
+    insp = [
+        ("2026/04/03", "(デモ疑似データ)4月.pdf",
+         synth_month(june, 0.55, 0.008, 0.93, 41, exclude=story,
+                     extra=[(105.390, "ud", 0.20, "")])),
+        ("2026/05/14", "(デモ疑似データ)5月1回目.pdf",
+         synth_month(june, 0.65, 0.008, 0.97, 42, exclude=story,
+                     extra=[(105.393, "ud", 0.22, "")])),
+        ("2026/05/26", "(デモ疑似データ)5月2回目.pdf",
+         synth_month(june, 0.62, 0.008, 0.99, 44, exclude=story,
+                     extra=[(105.386, "ud", 0.23, "")])),
+        ("2026/06/04", "(実データ)202603_2026.06.04.pdf",
+         [dict(r) for r in june]),
+        ("2026/07/02", "(デモ疑似データ)7月.pdf",
+         synth_month(june, 0.70, 0.008, 0.90, 43, exclude=story,
+                     extra=[(105.388, "ud", 0.16, "")])),
+    ]
     tol = 0.020
     tgt, lim = 0.20, 0.25
 
-    all_entries, over, tgt_rows, points = [], [], [], []
-    for mi in sorted(months):
-        label = MONTH_LABELS[mi - 1]
-        for row in months[mi]:
-            e = (label, metas[mi], row)
+    labels, all_entries, over, tgt_rows, points = [], [], [], [], []
+    for ii, (date, fname, rows) in enumerate(insp, start=1):
+        _, label = fiscal_key(date)
+        labels.append(label)
+        m = dict(meta, date=date, file=fname)
+        for row in rows:
+            e = (label, m, row)
             all_entries.append(e)
             v = row["ud"] if row["ud"] is not None else row["sa"]
             if v is None:
@@ -585,43 +668,38 @@ def fill_demo(wb, pdf_path):
             elif v >= tgt:
                 tgt_rows.append(e)
             kind = "上下動" if row["ud"] is not None else "左右動"
-            points.append((metas[mi]["line"], kind, row["km"], v, mi,
-                           row["biko"]))
+            points.append((m["line"], kind, row["km"], v, ii, row["biko"]))
 
     write_data_rows(wb["全データ"], all_entries)
     write_data_rows(wb["①基準値超過"], over)
     write_data_rows(wb["②目標値超過"], tgt_rows)
 
-    # 施工記録(デモ)
+    repairs = [("下線", 105.390, "2026/06/15", "むら直し施工")]
     ws = wb["施工記録"]
-    for col, v in zip(range(2, 6), ("下線", 105.390, "2026/06/15", "むら直し施工")):
+    for col, v in zip(range(2, 6), repairs[0]):
         ws.cell(row=5, column=col, value=v)
 
-    # 取込履歴
     ws = wb["取込履歴"]
-    for i, mi in enumerate(sorted(months)):
-        vals = [MONTH_LABELS[mi - 1], metas[mi]["line"], metas[mi]["date"],
-                metas[mi]["file"], len(months[mi]), "(デモ)"]
+    for i, (date, fname, rows) in enumerate(insp):
+        vals = [labels[i], meta["line"], date, fname, len(rows), "(デモ)"]
         for col, v in enumerate(vals, start=2):
             c = ws.cell(row=5 + i, column=col, value=v)
             c.border = BORDER
             c.font = Font(name=FONT, size=10)
 
     clusters = group_points(points, tol)
-    imported = sorted(months)
-    repairs = [("下線", 105.390, "2026/06/15", "むら直し施工")]
-    # 手入力メモの例(PDFに備考がない箇所へ後から書き足したという想定)
     memos = [("下線", 105.390, "継目部 要注意"),
              ("下線", 120.400, "踏切前後")]
     write_memo_sheet(wb, memos)
-    write_trend(wb, clusters, imported, tol, repairs, memos)
+    write_trend(wb, clusters, labels, tol, repairs, memos)
 
     story_no = next(i + 1 for i, c in enumerate(clusters)
                     if abs(c["rep"] - 105.385) < 0.02 and c["kind"] == "上下動")
-    story = clusters[story_no - 1]
-    write_chart_data(wb, clusters, imported, tgt, lim, selected=story_no)
-    print(f"デモ: {len(clusters)}箇所 / 物語の箇所No={story_no} "
-          f"(4月0.20→5月0.22→6月{story['months'].get(3)}→7月{story['months'].get(4)})")
+    st = clusters[story_no - 1]
+    write_chart_data(wb, clusters, labels, tgt, lim, selected=story_no)
+    print(f"デモ: {len(clusters)}箇所 / 検査{len(labels)}回 {labels} / "
+          f"物語の箇所No={story_no} 推移=" +
+          "→".join(str(st["insp"].get(i + 1, "−")) for i in range(len(labels))))
 
 
 def read_carry(path, tol_m=20):
@@ -676,21 +754,40 @@ def read_carry(path, tol_m=20):
     return memos, repairs
 
 
-def fill_from_pdfs(wb, specs, tol_m, target, limit, memos=(), repairs=()):
-    """specs: [(月番号1-12, PDFパス), ...] を取り込んで推移表・グラフまで作る。"""
-    tol = tol_m / 1000.0
-    months, metas = {}, {}
-    for mi, path in specs:
-        meta, rows = parse_pdf(path)
-        months.setdefault(mi, []).extend(rows)
-        metas[mi] = meta
-        print(f"{MONTH_LABELS[mi - 1]}: {path} → {len(rows)}行")
+def fill_from_pdfs(wb, paths, tol_m, target, limit, memos=(), repairs=()):
+    """PDFの一覧を取り込み、推移表・グラフまで作る。
 
-    all_entries, over, tgt_rows, points = [], [], [], []
-    for mi in sorted(months):
-        label = MONTH_LABELS[mi - 1]
-        for row in months[mi]:
-            e = (label, metas[mi], row)
+    何月分かはPDFの測定日から自動判定し、**検査日ごとに1列**を割り当てる。
+    同じ月に2回検査した場合も別々の列になり、どちらも失われない。
+    """
+    tol = tol_m / 1000.0
+    insp = []
+    for path in paths:
+        meta, rows = parse_source(path)
+        sort_key, label = fiscal_key(meta["date"])
+        if sort_key is None:
+            print(f"  警告: 測定日が読み取れません: {path}")
+            continue
+        insp.append((sort_key, label, meta, rows))
+    if not insp:
+        print("取り込めるPDFがありませんでした")
+        return
+    # 同じ測定日を2回指定した場合は後勝ちで1つにする
+    dedup = {}
+    for k, label, meta, rows in insp:
+        dedup[k] = (label, meta, rows)
+    insp = [(k,) + dedup[k] for k in sorted(dedup)]
+    if len(insp) > MAX_INSP:
+        print(f"  警告: 検査が{len(insp)}回あります。古い{len(insp) - MAX_INSP}回は"
+              f"入りきりません(上限{MAX_INSP}回)")
+        insp = insp[-MAX_INSP:]
+
+    labels, all_entries, over, tgt_rows, points = [], [], [], [], []
+    for ii, (_, label, meta, rows) in enumerate(insp, start=1):
+        labels.append(label)
+        print(f"  {label} ({meta['date']} {meta['line']}) → {len(rows)}行")
+        for row in rows:
+            e = (label, meta, row)
             all_entries.append(e)
             v = row["ud"] if row["ud"] is not None else row["sa"]
             if v is None:
@@ -700,17 +797,16 @@ def fill_from_pdfs(wb, specs, tol_m, target, limit, memos=(), repairs=()):
             elif v >= target:
                 tgt_rows.append(e)
             kind = "上下動" if row["ud"] is not None else "左右動"
-            points.append((metas[mi]["line"], kind, row["km"], v, mi,
-                           row["biko"]))
+            points.append((meta["line"], kind, row["km"], v, ii, row["biko"]))
 
     write_data_rows(wb["全データ"], all_entries)
     write_data_rows(wb["①基準値超過"], over)
     write_data_rows(wb["②目標値超過"], tgt_rows)
 
     ws = wb["取込履歴"]
-    for i, mi in enumerate(sorted(months)):
-        vals = [MONTH_LABELS[mi - 1], metas[mi]["line"], metas[mi]["date"],
-                metas[mi]["file"].split("/")[-1], len(months[mi]), ""]
+    for i, (_, label, meta, rows) in enumerate(insp):
+        vals = [label, meta["line"], meta["date"],
+                meta["file"].split("/")[-1].split("\\")[-1], len(rows), ""]
         for col, v in enumerate(vals, start=2):
             c = ws.cell(row=5 + i, column=col, value=v)
             c.border = BORDER
@@ -724,20 +820,20 @@ def fill_from_pdfs(wb, specs, tol_m, target, limit, memos=(), repairs=()):
 
     clusters = group_points(points, tol)
     write_memo_sheet(wb, memos)
-    write_trend(wb, clusters, sorted(months), tol, repairs, memos)
-    write_chart_data(wb, clusters, sorted(months), target, limit,
+    write_trend(wb, clusters, labels, tol, repairs, memos)
+    write_chart_data(wb, clusters, labels, target, limit,
                      selected=1 if clusters else None)
-    print(f"推移表: {len(clusters)}箇所")
+    print(f"推移表: {len(clusters)}箇所 / 検査{len(labels)}回")
 
 
 def main():
     ap = argparse.ArgumentParser(
         description="動揺データ年度推移管理ブックの生成",
         epilog="例: python build_trend_workbook.py -o 2026年度.xlsx "
-               "--pdf 4:4月.pdf --pdf 5:5月.pdf --pdf 6:6月.pdf")
+               "--pdf 4月.pdf --pdf 5月1回目.pdf --pdf 5月2回目.pdf")
     ap.add_argument("-o", "--output", required=True)
-    ap.add_argument("--pdf", action="append", metavar="月:PDF", default=[],
-                    help="暦月とPDFの組(例 6:202606.pdf)。複数指定可")
+    ap.add_argument("--pdf", action="append", metavar="PDF", default=[],
+                    help="取り込むPDF(複数指定可)。何月分かは測定日から自動判定します")
     ap.add_argument("--tol", type=float, default=20,
                     help="同一箇所とみなす距離(m) 既定20")
     ap.add_argument("--target", type=float, default=0.20, help="目標値")
@@ -754,11 +850,12 @@ def main():
     elif args.pdf:
         memos, repairs = (read_carry(args.carry, args.tol)
                           if args.carry else ([], []))
-        specs = []
-        for s in args.pdf:
-            month, _, path = s.partition(":")
-            specs.append((fiscal_index(int(month)), path))
-        fill_from_pdfs(wb, specs, args.tol, args.target, args.limit,
+        # 旧形式「6:file.pdf」も受け付ける(先頭の月指定は無視)
+        paths = []
+        for item in args.pdf:
+            head, sep, rest = item.partition(":")
+            paths.append(rest if sep and head.isdigit() else item)
+        fill_from_pdfs(wb, paths, args.tol, args.target, args.limit,
                        memos, repairs)
         wb["設定"]["C6"] = args.tol
         wb["設定"]["C3"] = args.target

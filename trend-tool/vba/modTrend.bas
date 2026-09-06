@@ -26,11 +26,12 @@ Public Const SH_PREV As String = "前年度実績"
 
 Public Const D_START As Long = 5      ' データ開始行
 Public Const ALL_COLS As Long = 13    ' 全データの列数(13列目=月)
-Public Const TREND_COLS As Long = 24  ' 推移表の列数
+Public Const MAX_INSP As Long = 24    ' 1年度に取り込める検査の最大回数
 Public Const C_MEMO As Long = 8       ' 推移表 H列 = メモ(手入力)
-Public Const C_MON0 As Long = 9       ' 推移表 I列 = 4月
-Public Const C_YMAX As Long = 21      ' U列 = 年間最大
-Public Const C_PREV As Long = 22      ' V列 = 前年度値
+Public Const C_INS0 As Long = 9       ' 推移表 I列 = 第1回(検査日ごとに1列)
+Public Const C_YMAX As Long = 33      ' 年間最大 (= C_INS0 + MAX_INSP)
+Public Const C_PREV As Long = 34      ' 前年度値
+Public Const TREND_COLS As Long = 36  ' 推移表の列数
 Public Const MAX_ROWS As Long = 20000
 
 '--- グループ(箇所) ---
@@ -42,7 +43,7 @@ Private Type TCluster
     hi As Double
     biko As String
     maxV As Double
-    mon(1 To 12) As Double
+    ins(1 To 24) As Double        ' MAX_INSP と同数
 End Type
 
 '--- 手入力メモ / 施工記録 ---
@@ -128,7 +129,7 @@ Public Sub 貼付PDF取込()
     ImportMonthly paths
 End Sub
 
-'--- PDFを月別に取り込む(同じ月は入れ替え) ---
+'--- PDFを検査日ごとに取り込む(同じ検査日は入れ替え) ---
 Private Sub ImportMonthly(paths As Collection)
     Dim p As Variant, okCnt As Long, addCnt As Long, ngList As String
     Application.ScreenUpdating = False
@@ -139,14 +140,16 @@ Private Sub ImportMonthly(paths As Collection)
         Set rows = Nothing
         If ParsePdf(CStr(p), rows) Then          ' modEngine
             If rows.Count > 0 Then
-                Dim mi As Long
-                mi = MonthIdxFromDate(CStr(rows(1)(9)))
-                If mi = 0 Then
+                Dim lbl As String
+                lbl = InspLabel(CStr(rows(1)(9)))
+                If lbl = "" Then
                     ngList = ngList & vbCrLf & "  " & p & " (測定日が読み取れません)"
                 Else
-                    RemoveMonth mi
-                    AppendAll rows, mi
-                    LogHistory mi, rows
+                    ' 同じ検査日の分だけ入れ替える。月ではなく日で判定するので、
+                    ' 5/14と5/26のように同じ月に2回検査しても消えない
+                    RemoveInspection lbl
+                    AppendAll rows, lbl
+                    LogHistory lbl, rows
                     okCnt = okCnt + 1
                     addCnt = addCnt + rows.Count
                 End If
@@ -167,25 +170,25 @@ done:
     MsgBox msg, IIf(ngList = "", vbInformation, vbExclamation)
 End Sub
 
-'--- 「2026/06/04」等から年度内月番号(4月=1 … 3月=12)を得る ---
-Private Function MonthIdxFromDate(s As String) As Long
-    Dim parts() As String, m As Long
-    s = Replace(Replace(s, "-", "/"), ".", "/")
-    parts = Split(s, "/")
-    If UBound(parts) < 1 Then Exit Function
-    m = Val(parts(1))
-    If m < 1 Or m > 12 Then Exit Function
-    MonthIdxFromDate = ((m - 4 + 12) Mod 12) + 1
+'--- 「2026/06/04」→ "6/4"。検査日ラベル(1検査=1列のキー) ---
+Public Function InspLabel(s As String) As String
+    Dim parts() As String
+    parts = Split(Replace(Replace(s, "-", "/"), ".", "/"), "/")
+    If UBound(parts) < 2 Then Exit Function
+    If Val(parts(1)) < 1 Or Val(parts(1)) > 12 Then Exit Function
+    InspLabel = CStr(Val(parts(1))) & "/" & CStr(Val(parts(2)))
 End Function
 
-Public Function MonthLabel(mi As Long) As String
-    Dim m As Long
-    m = ((mi - 1 + 3) Mod 12) + 1
-    MonthLabel = m & "月"
+'--- 「2026/06/04」→ 20260604。検査を古い順に並べるためのキー ---
+Private Function DateKey(s As String) As Long
+    Dim parts() As String
+    parts = Split(Replace(Replace(s, "-", "/"), ".", "/"), "/")
+    If UBound(parts) < 2 Then Exit Function
+    DateKey = Val(parts(0)) * 10000 + Val(parts(1)) * 100 + Val(parts(2))
 End Function
 
-'--- 指定した月の既存行を「全データ」から削除(取り直しの二重計上防止) ---
-Private Sub RemoveMonth(mi As Long)
+'--- 指定した検査日の既存行を「全データ」から削除(取り直しの二重計上防止) ---
+Private Sub RemoveInspection(lbl As String)
     Dim ws As Worksheet
     Set ws = ThisWorkbook.Worksheets(SH_ALL)
     Dim lastR As Long
@@ -197,8 +200,6 @@ Private Sub RemoveMonth(mi As Long)
     Dim keep() As Variant
     ReDim keep(1 To UBound(arr, 1), 1 To ALL_COLS)
     Dim r As Long, k As Long, c As Long
-    Dim lbl As String
-    lbl = MonthLabel(mi)
     For r = 1 To UBound(arr, 1)
         If CStr(arr(r, ALL_COLS)) <> lbl Then
             k = k + 1
@@ -213,7 +214,7 @@ Private Sub RemoveMonth(mi As Long)
         ws.Range(ws.Cells(D_START, 1), ws.Cells(D_START + k - 1, ALL_COLS)).Value = keep
     End If
 
-    ' 取込履歴からも該当月を消す
+    ' 取込履歴からも該当検査日を消す
     Set ws = ThisWorkbook.Worksheets(SH_HIST)
     lastR = ws.Cells(ws.Rows.Count, 2).End(xlUp).Row
     For r = lastR To D_START Step -1
@@ -222,7 +223,7 @@ Private Sub RemoveMonth(mi As Long)
 End Sub
 
 '--- 「全データ」へ追記(13列目に月ラベル) ---
-Private Sub AppendAll(rows As Collection, mi As Long)
+Private Sub AppendAll(rows As Collection, lbl As String)
     Dim ws As Worksheet
     Set ws = ThisWorkbook.Worksheets(SH_ALL)
     Dim startR As Long
@@ -237,7 +238,7 @@ Private Sub AppendAll(rows As Collection, mi As Long)
         For i = 1 To 12
             out(k, i) = item(i)
         Next
-        out(k, ALL_COLS) = MonthLabel(mi)
+        out(k, ALL_COLS) = lbl
     Next
     With ws.Range(ws.Cells(startR, 1), ws.Cells(startR + rows.Count - 1, ALL_COLS))
         .Value = out
@@ -248,13 +249,13 @@ Private Sub AppendAll(rows As Collection, mi As Long)
     End With
 End Sub
 
-Private Sub LogHistory(mi As Long, rows As Collection)
+Private Sub LogHistory(lbl As String, rows As Collection)
     Dim ws As Worksheet
     Set ws = ThisWorkbook.Worksheets(SH_HIST)
     Dim r As Long
     r = ws.Cells(ws.Rows.Count, 2).End(xlUp).Row + 1
     If r < D_START Then r = D_START
-    ws.Cells(r, 2).Value = MonthLabel(mi)
+    ws.Cells(r, 2).Value = lbl
     ws.Cells(r, 3).Value = rows(1)(10)          ' 線別
     ws.Cells(r, 4).Value = rows(1)(9)           ' 測定日
     ws.Cells(r, 5).Value = rows(1)(12)          ' 元ファイル
@@ -303,16 +304,48 @@ Public Sub 再計算Silent()
     Dim arr As Variant
     arr = ws.Range(ws.Cells(D_START, 1), ws.Cells(lastR, ALL_COLS)).Value
 
-    ' --- 2) 点の一覧を作る ---
-    Dim n As Long
+    ' --- 2) 検査の一覧を作る(測定日ごとに1列。古い順に並べる) ---
+    Dim insLbl(1 To MAX_INSP) As String
+    Dim insKey(1 To MAX_INSP) As Long
+    Dim nIns As Long
+    Dim n As Long, r As Long, q As Long
     n = UBound(arr, 1)
-    Dim pLine() As String, pKind() As String, pKm() As Double
-    Dim pVal() As Double, pMi() As Long, pBiko() As String
-    ReDim pLine(1 To n): ReDim pKind(1 To n): ReDim pKm(1 To n)
-    ReDim pVal(1 To n): ReDim pMi(1 To n): ReDim pBiko(1 To n)
+    For r = 1 To n
+        Dim lb As String
+        lb = CStr(arr(r, ALL_COLS))
+        If Len(lb) > 0 Then
+            Dim found As Boolean
+            found = False
+            For q = 1 To nIns
+                If insLbl(q) = lb Then found = True
+            Next
+            If Not found And nIns < MAX_INSP Then
+                nIns = nIns + 1
+                insLbl(nIns) = lb
+                insKey(nIns) = DateKey(CStr(arr(r, 9)))
+            End If
+        End If
+    Next
+    ' 測定日の古い順に並べ替え(単純な挿入ソート。多くても24件)
+    Dim a As Long, b As Long, tk As Long, ts As String
+    For a = 2 To nIns
+        tk = insKey(a): ts = insLbl(a)
+        b = a - 1
+        Do While b >= 1
+            If insKey(b) <= tk Then Exit Do
+            insKey(b + 1) = insKey(b): insLbl(b + 1) = insLbl(b)
+            b = b - 1
+        Loop
+        insKey(b + 1) = tk: insLbl(b + 1) = ts
+    Next
 
-    Dim monthUsed(1 To 12) As Boolean
-    Dim r As Long, cnt As Long, v As Double, mi As Long
+    ' --- 3) 点の一覧を作る ---
+    Dim pLine() As String, pKind() As String, pKm() As Double
+    Dim pVal() As Double, pIi() As Long, pBiko() As String
+    ReDim pLine(1 To n): ReDim pKind(1 To n): ReDim pKm(1 To n)
+    ReDim pVal(1 To n): ReDim pIi(1 To n): ReDim pBiko(1 To n)
+
+    Dim cnt As Long, v As Double, ii As Long
     For r = 1 To n
         If Len(CStr(arr(r, 4))) > 0 Then
             v = -1
@@ -323,16 +356,18 @@ Public Sub 再計算Silent()
             ElseIf IsNumeric(arr(r, 6)) And Len(CStr(arr(r, 6))) > 0 Then
                 v = CDbl(arr(r, 6)): kind = "左右動"
             End If
-            mi = MonthIdxFromLabel(CStr(arr(r, ALL_COLS)))
-            If v > 0 And mi > 0 Then
+            ii = 0
+            For q = 1 To nIns
+                If insLbl(q) = CStr(arr(r, ALL_COLS)) Then ii = q
+            Next
+            If v > 0 And ii > 0 Then
                 cnt = cnt + 1
                 pLine(cnt) = CStr(arr(r, 10))
                 pKind(cnt) = kind
                 pKm(cnt) = CDbl(arr(r, 4))
                 pVal(cnt) = v
-                pMi(cnt) = mi
+                pIi(cnt) = ii
                 pBiko(cnt) = CStr(arr(r, 8))
-                monthUsed(mi) = True
             End If
         End If
     Next
@@ -342,7 +377,7 @@ Public Sub 再計算Silent()
         Exit Sub
     End If
 
-    ' --- 3) 線別+区分+キロ程 で並べ替え ---
+    ' --- 4) 線別+区分+キロ程 で並べ替え ---
     Dim idx() As Long, key() As String
     ReDim idx(1 To cnt): ReDim key(1 To cnt)
     For r = 1 To cnt
@@ -351,7 +386,7 @@ Public Sub 再計算Silent()
     Next
     QuickSortIdx key, idx, 1, cnt
 
-    ' --- 4) 鎖方式でグループ化 ---
+    ' --- 5) 鎖方式でグループ化 ---
     Dim cl() As TCluster, nc As Long
     ReDim cl(1 To cnt)
     Dim i As Long, j As Long, prevKm As Double
@@ -374,7 +409,7 @@ Public Sub 再計算Silent()
         End If
         cl(nc).hi = pKm(j)
         prevKm = pKm(j)
-        If pVal(j) > cl(nc).mon(pMi(j)) Then cl(nc).mon(pMi(j)) = pVal(j)
+        If pVal(j) > cl(nc).ins(pIi(j)) Then cl(nc).ins(pIi(j)) = pVal(j)
         If pVal(j) > cl(nc).maxV Then
             cl(nc).maxV = pVal(j)
             cl(nc).rep = pKm(j)
@@ -382,27 +417,20 @@ Public Sub 再計算Silent()
         If Len(pBiko(j)) > 0 And Len(cl(nc).biko) = 0 Then cl(nc).biko = pBiko(j)
     Next
 
-    ' --- 5) 推移表へ書き出し ---
+    ' --- 6) 推移表へ書き出し ---
     Dim rep() As TRepair, nRep As Long
     ReadRepairs rep, nRep
-    WriteTrend cl, nc, monthUsed, memos, nMemo, rep, nRep, tol
+    WriteTrend cl, nc, insLbl, nIns, memos, nMemo, rep, nRep, tol
     WriteMemoSheet memos, nMemo
 
-    ' --- 6) ①② を作り直す ---
+    ' --- 7) ①② を作り直す ---
     RebuildExtracts arr, n, tgt, lim
 
-    ' --- 7) グラフ ---
-    グラフ更新Silent cl, nc, monthUsed, tgt, lim
+    ' --- 8) グラフ ---
+    グラフ更新Silent cl, nc, insLbl, nIns, tgt, lim
 
     Application.ScreenUpdating = True
 End Sub
-
-Private Function MonthIdxFromLabel(s As String) As Long
-    Dim m As Long
-    m = Val(Replace(s, "月", ""))
-    If m < 1 Or m > 12 Then Exit Function
-    MonthIdxFromLabel = ((m - 4 + 12) Mod 12) + 1
-End Function
 
 
 '==============================================================
@@ -521,12 +549,23 @@ Private Sub ClearTrend()
     End If
 End Sub
 
-Private Sub WriteTrend(cl() As TCluster, nc As Long, monthUsed() As Boolean, _
+Private Sub WriteTrend(cl() As TCluster, nc As Long, _
+                       insLbl() As String, nIns As Long, _
                        memos() As TMemo, nMemo As Long, _
                        rep() As TRepair, nRep As Long, tol As Double)
-    If nc = 0 Then Exit Sub
     Dim ws As Worksheet
     Set ws = ThisWorkbook.Worksheets(SH_TREND)
+
+    ' 見出しを実際の検査日にする(未使用の列は「第n回」に戻す)
+    Dim h As Long
+    For h = 1 To MAX_INSP
+        If h <= nIns Then
+            ws.Cells(4, C_INS0 + h - 1).Value = insLbl(h)
+        Else
+            ws.Cells(4, C_INS0 + h - 1).Value = "第" & h & "回"
+        End If
+    Next
+    If nc = 0 Then Exit Sub
 
     Dim out() As Variant
     ReDim out(1 To nc, 1 To TREND_COLS)
@@ -556,21 +595,21 @@ Private Sub WriteTrend(cl() As TCluster, nc As Long, monthUsed() As Boolean, _
         Next
         out(i, C_MEMO) = memo
 
-        For m = 1 To 12
-            If cl(i).mon(m) > 0 Then
-                out(i, C_MON0 + m - 1) = cl(i).mon(m)
-            ElseIf monthUsed(m) Then
-                out(i, C_MON0 + m - 1) = "－"       ' 0.15G未満に収まっていた
+        For m = 1 To nIns
+            If cl(i).ins(m) > 0 Then
+                out(i, C_INS0 + m - 1) = cl(i).ins(m)
+            Else
+                out(i, C_INS0 + m - 1) = "－"       ' その検査では0.15G未満に収まっていた
             End If
         Next
-        out(i, C_YMAX) = "=MAX(I" & (D_START + i - 1) & ":T" & (D_START + i - 1) & ")"
+        out(i, C_YMAX) = "=MAX(I" & (D_START + i - 1) & ":AF" & (D_START + i - 1) & ")"
         out(i, C_PREV) = PrevYearValue(cl(i).line, cl(i).lo, cl(i).hi, tol)
 
         For k = 1 To nRep
             If rep(k).line = cl(i).line Then
                 If rep(k).km >= cl(i).lo - tol And rep(k).km <= cl(i).hi + tol Then
-                    out(i, 23) = rep(k).d
-                    out(i, 24) = rep(k).text
+                    out(i, C_PREV + 1) = rep(k).d
+                    out(i, C_PREV + 2) = rep(k).text
                 End If
             End If
         Next
@@ -685,23 +724,35 @@ Public Sub グラフ更新()
 End Sub
 
 Private Sub グラフ更新Silent(cl() As TCluster, nc As Long, _
-                             monthUsed() As Boolean, tgt As Double, lim As Double)
+                             insLbl() As String, nIns As Long, _
+                             tgt As Double, lim As Double)
     Dim ws As Worksheet
     Set ws = ThisWorkbook.Worksheets(SH_CHART)
     Dim sel As Long, j As Long, k As Long
 
-    ' --- 選択箇所(40～43行) ---
+    ' --- 検査日の見出し(40行・50行) ---
+    For j = 1 To MAX_INSP
+        If j <= nIns Then
+            ws.Cells(40, 1 + j).Value = insLbl(j)
+            ws.Cells(50, 1 + j).Value = insLbl(j)
+        Else
+            ws.Cells(40, 1 + j).ClearContents
+            ws.Cells(50, 1 + j).ClearContents
+        End If
+    Next
+
+    ' --- 選択箇所(41～43行) ---
     sel = Val(ws.Range("C2").Value)
     If sel < 1 Or sel > nc Then
         sel = 1
         ws.Range("C2").Value = IIf(nc > 0, 1, "")
     End If
-    ws.Range(ws.Cells(41, 1), ws.Cells(43, 13)).ClearContents
+    ws.Range(ws.Cells(41, 1), ws.Cells(43, 1 + MAX_INSP)).ClearContents
     If nc > 0 Then
         ws.Cells(41, 1).Value = "No" & sel & " " & cl(sel).line & " " & _
                                 Format(cl(sel).rep, "0.000") & "(" & cl(sel).kind & ")"
-        For j = 1 To 12
-            If cl(sel).mon(j) > 0 Then ws.Cells(41, 1 + j).Value = cl(sel).mon(j)
+        For j = 1 To nIns
+            If cl(sel).ins(j) > 0 Then ws.Cells(41, 1 + j).Value = cl(sel).ins(j)
             ws.Cells(42, 1 + j).Value = tgt
             ws.Cells(43, 1 + j).Value = lim
         Next
@@ -709,29 +760,21 @@ Private Sub グラフ更新Silent(cl() As TCluster, nc As Long, _
     ws.Cells(42, 1).Value = "目標値"
     ws.Cells(43, 1).Value = "基準値"
 
-    ' --- ワースト5(51～56行): 最新の取込月の値が大きい順 ---
-    Dim latest As Long
-    For j = 12 To 1 Step -1
-        If monthUsed(j) Then
-            latest = j
-            Exit For
-        End If
-    Next
-    ws.Range(ws.Cells(51, 1), ws.Cells(56, 13)).ClearContents
-    If latest > 0 And nc > 0 Then
+    ' --- ワースト5(51～56行): 最新の検査の値が大きい順 ---
+    ws.Range(ws.Cells(51, 1), ws.Cells(56, 1 + MAX_INSP)).ClearContents
+    If nIns > 0 And nc > 0 Then
         Dim topIdx(1 To 5) As Long, topVal(1 To 5) As Double
-        Dim i As Long, s As Long
+        Dim i As Long, sp As Long, m2 As Long
         For i = 1 To nc
-            If cl(i).mon(latest) > 0 Then
-                For s = 1 To 5
-                    If cl(i).mon(latest) > topVal(s) Then
-                        Dim m2 As Long
-                        For m2 = 5 To s + 1 Step -1
+            If cl(i).ins(nIns) > 0 Then
+                For sp = 1 To 5
+                    If cl(i).ins(nIns) > topVal(sp) Then
+                        For m2 = 5 To sp + 1 Step -1
                             topVal(m2) = topVal(m2 - 1)
                             topIdx(m2) = topIdx(m2 - 1)
                         Next
-                        topVal(s) = cl(i).mon(latest)
-                        topIdx(s) = i
+                        topVal(sp) = cl(i).ins(nIns)
+                        topIdx(sp) = i
                         Exit For
                     End If
                 Next
@@ -742,8 +785,8 @@ Private Sub グラフ更新Silent(cl() As TCluster, nc As Long, _
                 i = topIdx(k)
                 ws.Cells(50 + k, 1).Value = "No" & i & " " & _
                     Format(cl(i).rep, "0.000") & "(" & cl(i).kind & ")"
-                For j = 1 To 12
-                    If cl(i).mon(j) > 0 Then ws.Cells(50 + k, 1 + j).Value = cl(i).mon(j)
+                For j = 1 To nIns
+                    If cl(i).ins(j) > 0 Then ws.Cells(50 + k, 1 + j).Value = cl(i).ins(j)
                 Next
             Else
                 ws.Cells(50 + k, 1).Value = "(ワースト" & k & ")"
@@ -751,7 +794,7 @@ Private Sub グラフ更新Silent(cl() As TCluster, nc As Long, _
         Next
     End If
     ws.Cells(56, 1).Value = "基準値"
-    For j = 1 To 12
+    For j = 1 To nIns
         ws.Cells(56, 1 + j).Value = lim
     Next
 End Sub
