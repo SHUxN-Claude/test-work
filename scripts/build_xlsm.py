@@ -96,12 +96,13 @@ def build_xlsm(src_xlsx, out_xlsm, vba_bin):
                 t = data.decode("utf-8")
                 if CT_OLD in t:
                     t = t.replace(CT_OLD, CT_NEW)
-                if 'Extension="bin"' not in t:
+                # bin拡張子は printerSettings 用の既定が既にあることが多い。
+                # 既定より Override が優先されるので、必ず Override で宣言する。
+                if "/xl/vbaProject.bin" not in t:
                     t = t.replace(
-                        "<Default Extension=",
-                        '<Default Extension="bin" '
-                        'ContentType="application/vnd.ms-office.vbaProject"/>'
-                        "<Default Extension=", 1)
+                        "</Types>",
+                        '<Override PartName="/xl/vbaProject.bin" '
+                        'ContentType="application/vnd.ms-office.vbaProject"/></Types>', 1)
                 data = t.encode("utf-8")
             elif item.filename == "xl/_rels/workbook.xml.rels":
                 t = data.decode("utf-8")
