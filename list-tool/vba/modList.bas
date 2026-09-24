@@ -103,6 +103,7 @@ Private mLoaded As Boolean
 ' 初期設定(ボタン設置 + ひな形作成)
 '==============================================================
 Public Sub 初期設定()
+    On Error GoTo eh
     If LCase(Right(ThisWorkbook.Name, 5)) <> ".xlsm" Then
         If MsgBox("このブックがマクロ有効ブック(.xlsm)として保存されていません。" & vbCrLf & _
                   "このまま保存するとマクロが消えてしまいます。" & vbCrLf & vbCrLf & _
@@ -119,11 +120,19 @@ Public Sub 初期設定()
         End If
     Next
 
-    If Not SheetExists(SH_TPL) Then MakeTemplate
+    If SheetExists(SH_TPL) Then
+        ClearSheet ThisWorkbook.Worksheets(SH_TPL), True   ' 途中で止まった分を整える
+    Else
+        MakeTemplate
+    End If
 
     MsgBox cnt & " 枚の月シートにボタンを設置しました。" & vbCrLf & _
            "「" & SH_TPL & "」シートも用意しました。" & vbCrLf & vbCrLf & _
            "新しい月は「新しい月のシートを作る」ボタンから作成してください。", vbInformation
+    Exit Sub
+eh:
+    MsgBox "初期設定の途中でエラーが発生しました。" & vbCrLf & vbCrLf & _
+           "エラー " & Err.Number & "： " & Err.Description, vbExclamation
 End Sub
 
 Private Sub PutButtons(ws As Worksheet)
@@ -270,15 +279,39 @@ Private Sub ClearSheet(ws As Worksheet, alsoHeader As Boolean)
     Dim lastR As Long
     lastR = LastDataRow(ws)
     If lastR >= R_DATA Then
+        UnmergeData ws, lastR
         With ws.Range(ws.Cells(R_DATA, 1), ws.Cells(lastR, C_LAST))
             .ClearContents
             .Interior.Pattern = xlNone
         End With
     End If
     If alsoHeader Then
-        ws.Cells(1, 11).ClearContents          ' K1 走行日
-        ws.Cells(1, 17).ClearContents          ' Q1 施工期限
+        ClearMerged ws, 1, 11                  ' K1 走行日
+        ClearMerged ws, 1, 17                  ' Q1 施工期限
     End If
+End Sub
+
+'--- 結合セルは「結合範囲ごと」でないとクリアできない(実行時エラー1004対策) ---
+Private Sub ClearMerged(ws As Worksheet, r As Long, c As Long)
+    ws.Cells(r, c).MergeArea.ClearContents
+End Sub
+
+'--- 結合セルへの書き込みは左上に対して行う ---
+Private Sub SetMerged(ws As Worksheet, r As Long, c As Long, v As Variant)
+    With ws.Cells(r, c).MergeArea
+        .Cells(1, 1).Value = v
+    End With
+End Sub
+
+'--- データ行の結合を解除する。
+'    このツールは結合を使わない方針(手で行を足し引きしても崩れないように)なので、
+'    元の表にB列などの結合が残っていればここで外す。
+Private Sub UnmergeData(ws As Worksheet, lastR As Long)
+    If lastR < R_DATA Then Exit Sub
+    Dim rng As Range
+    Set rng = ws.Range(ws.Cells(R_DATA, 1), ws.Cells(lastR, C_LAST))
+    If rng.MergeCells = False Then Exit Sub
+    rng.UnMerge
 End Sub
 
 Private Function LastDataRow(ws As Worksheet) As Long
@@ -297,6 +330,7 @@ End Function
 ' 取込(メイン)
 '==============================================================
 Public Sub 一覧に取込()
+    On Error GoTo eh
     Dim ws As Worksheet
     Set ws = ActiveSheet
     If Not IsMonthSheet(ws.Name) Then
@@ -348,6 +382,7 @@ Public Sub 一覧に取込()
     Dim startR As Long, r As Long, j As Long, newCnt As Long, dupCnt As Long
     startR = LastDataRow(ws) + 1
     If startR < R_DATA Then startR = R_DATA
+    UnmergeData ws, startR + n + 5        ' 結合が残っていると書き込めないため
 
     For i = 1 To n
         j = idx(i)
@@ -362,9 +397,9 @@ Public Sub 一覧に取込()
     Next
 
     ' --- ヘッダー(走行日・施工期限) ---
-    If Not IsEmpty(insp(idx(1))) Then ws.Cells(1, 11).Value = insp(idx(1))
+    If Not IsEmpty(insp(idx(1))) Then SetMerged ws, 1, 11, insp(idx(1))
     Recalc ws, False
-    ws.Cells(1, 17).Value = ws.Cells(R_DATA, C_LIMIT).Value
+    SetMerged ws, 1, 17, ws.Cells(R_DATA, C_LIMIT).Value
 
     Application.ScreenUpdating = True
     Dim msg As String
@@ -378,6 +413,11 @@ Public Sub 一覧に取込()
         msg = msg & vbCrLf & vbCrLf & "色は「番号・日数を再計算」で消えます。"
     End If
     MsgBox msg, vbInformation
+    Exit Sub
+eh:
+    Application.ScreenUpdating = True
+    MsgBox "取込の途中でエラーが発生しました。" & vbCrLf & vbCrLf & _
+           "エラー " & Err.Number & "： " & Err.Description, vbExclamation
 End Sub
 
 '--- 抽出ツール1ファイルを読む ---
@@ -543,6 +583,7 @@ End Sub
 ' 番号・日数の再計算(数式を使わずに値で埋める)
 '==============================================================
 Public Sub 番号日数を再計算()
+    On Error GoTo eh
     Dim ws As Worksheet
     Set ws = ActiveSheet
     If Not IsMonthSheet(ws.Name) And ws.Name <> SH_TPL Then
@@ -551,12 +592,18 @@ Public Sub 番号日数を再計算()
     End If
     Recalc ws, True
     MsgBox "番号・現場・期限・日数を計算し直しました。", vbInformation
+    Exit Sub
+eh:
+    Application.ScreenUpdating = True
+    MsgBox "再計算の途中でエラーが発生しました。" & vbCrLf & vbCrLf & _
+           "エラー " & Err.Number & "： " & Err.Description, vbExclamation
 End Sub
 
 Private Sub Recalc(ws As Worksheet, askSort As Boolean)
     Dim lastR As Long
     lastR = LastDataRow(ws)
     If lastR < R_DATA Then Exit Sub
+    UnmergeData ws, lastR
 
     ' --- 並べ替え(下り昇順 → 上り昇順) ---
     If askSort Then
@@ -629,7 +676,7 @@ Private Sub Recalc(ws As Worksheet, askSort As Boolean)
             End If
         End If
     Next
-    If lastR >= R_DATA Then ws.Cells(1, 17).Value = ws.Cells(R_DATA, C_LIMIT).Value
+    If lastR >= R_DATA Then SetMerged ws, 1, 17, ws.Cells(R_DATA, C_LIMIT).Value
 End Sub
 
 Private Sub SortSheet(ws As Worksheet, lastR As Long)
