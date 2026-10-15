@@ -8,8 +8,11 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-SRC = "/root/.claude/uploads/ff77b9b4-9504-506f-b7be-aa7ff9919ea5/7b5d4609-_202601_____068.500095.000_______.xlsx"
-OUT = "/tmp/claude-0/-home-user-test-work/ff77b9b4-9504-506f-b7be-aa7ff9919ea5/scratchpad/軌道検査_前回今回比較.xlsx"
+import sys
+
+# 使い方: python build_comparison.py 入力.xlsx(m) 出力.xlsx
+SRC = sys.argv[1] if len(sys.argv) > 1 else "input.xlsx"
+OUT = sys.argv[2] if len(sys.argv) > 2 else "軌道検査_前回今回比較.xlsx"
 
 TH_LOW, TH_HIGH = 10.0, 15.0
 
@@ -45,6 +48,9 @@ def to_num(v):
     if isinstance(v, (int, float)):
         return v
     s = str(v).strip()
+    # CSV由来の ="418" 形式(数式として文字列化されたもの)を剥がす
+    if s.startswith('="') and s.endswith('"'):
+        s = s[2:-1]
     if s == "":
         return None
     if NUM_RE.match(s):
@@ -52,7 +58,7 @@ def to_num(v):
         if "." not in s:
             return int(f)
         return f
-    return v  # 文字列のまま
+    return s if s != str(v).strip() else v  # 文字列のまま
 
 
 def read_sheet(ws):
@@ -85,7 +91,7 @@ def build():
 
     # 必須ヘッダの存在チェック
     for name, hidx, sheet in ((ph, phi, "前回"), (ch, chi, "今回")):
-        for h in KEY_HEADERS + ["実績番号", "測定日", "No", "線名", "線路名"]:
+        for h in KEY_HEADERS + ["実績番号", "測定日", "No", "線名", "駅名称", "線路名"]:
             if h not in hidx:
                 problems.append(f"シート「{sheet}」にヘッダ「{h}」が見つかりません")
         for _, vh, fh in ITEMS:
@@ -150,7 +156,7 @@ def build():
     ws_chk = wb.create_sheet("チェック")
 
     # ---- 比較シートヘッダ ----
-    base_headers = ["No", "線名", "線路名", "キロ程", "判定", "該当項目",
+    base_headers = ["No", "線名", "駅名称", "線路名", "キロ程", "判定", "該当項目",
                     "前回実績番号", "今回実績番号", "前回測定日", "今回測定日",
                     "WB", "本準側名"]
     headers = list(base_headers)
@@ -186,7 +192,7 @@ def build():
             return to_num(p[phi[h]]) if p is not None else None
 
         row_vals = [
-            cv("No"), cv("線名"), cv("線路名"), cv("キロ程"),
+            cv("No"), cv("線名"), cv("駅名称"), cv("線路名"), cv("キロ程"),
             "", "",  # 判定・該当項目は後で
             pv("実績番号"), cv("実績番号"), pv("測定日"), cv("測定日"),
             cv("WB"), cv("本準側名"),
@@ -226,18 +232,18 @@ def build():
                         fills.append((out_r, c0 + 1, FILL_ORANGE))
                         fills.append((out_r, c0 + 2, FILL_ORANGE))
         if worst == 2:
-            row_vals[4] = "15mm以上"
+            row_vals[5] = "15mm以上"
         elif worst == 1:
-            row_vals[4] = "10mm以上15mm未満"
-        row_vals[5] = "、".join(hit_items)
+            row_vals[5] = "10mm以上15mm未満"
+        row_vals[6] = "、".join(hit_items)
         if p is None:
-            row_vals[5] = "(前回データなし)" if not hit_items else row_vals[5] + "、(前回データなし)"
+            row_vals[6] = "(前回データなし)" if not hit_items else row_vals[6] + "、(前回データなし)"
         ws_cmp.append(row_vals)
         if worst == 2:
-            fills.append((out_r, 5, FILL_RED))
+            fills.append((out_r, 6, FILL_RED))
             extract_src_rows.append(out_r)
         elif worst == 1:
-            fills.append((out_r, 5, FILL_ORANGE))
+            fills.append((out_r, 6, FILL_ORANGE))
             extract_src_rows.append(out_r)
 
     # 前回にあって今回にないキー
@@ -268,7 +274,7 @@ def build():
         for rr in range(2, maxr + 1):
             ws_cmp.cell(row=rr, column=c).number_format = fmt
     # 列幅
-    widths = {"No": 6, "線名": 11, "線路名": 9, "キロ程": 10, "判定": 16,
+    widths = {"No": 6, "線名": 11, "駅名称": 10, "線路名": 9, "キロ程": 10, "判定": 16,
               "該当項目": 18, "前回実績番号": 12, "今回実績番号": 12,
               "前回測定日": 11, "今回測定日": 11, "WB": 5, "本準側名": 9}
     for h, w in widths.items():
@@ -277,7 +283,7 @@ def build():
         if h not in widths:
             ws_cmp.column_dimensions[get_column_letter(col_of[h])].width = 11
     ws_cmp.auto_filter.ref = f"A1:{get_column_letter(ncols)}{maxr}"
-    ws_cmp.freeze_panes = "G2"
+    ws_cmp.freeze_panes = "H2"
 
     # ---- 抽出_要対応 ----
     ws_ext.append(headers)
@@ -305,7 +311,7 @@ def build():
             ws_ext.column_dimensions[get_column_letter(col_of[h])].width = 11
     if er > 1:
         ws_ext.auto_filter.ref = f"A1:{get_column_letter(ncols)}{er}"
-    ws_ext.freeze_panes = "G2"
+    ws_ext.freeze_panes = "H2"
 
     # ---- チェックシート ----
     ws_chk.column_dimensions["A"].width = 42

@@ -29,7 +29,7 @@ Private Const TH_LOW As Double = 10#    ' 変位進み量 下側しきい値(mm)
 Private Const TH_HIGH As Double = 15#   ' 変位進み量 上側しきい値(mm)
 
 Private Const N_ITEMS As Long = 9
-Private Const N_BASE As Long = 12       ' 基本情報の列数
+Private Const N_BASE As Long = 13       ' 基本情報の列数
 
 Public Sub 比較シート作成()
     Dim t0 As Double: t0 = Timer
@@ -83,7 +83,7 @@ Public Sub 比較シート作成()
     Dim hP As Object, hC As Object
     Set hP = HeaderMap(dP): Set hC = HeaderMap(dC)
     Dim need As Variant, i As Long
-    need = Array("No", "実績番号", "線名", "線路名", "本準側名", "WB", "キロ程", "測定日")
+    need = Array("No", "実績番号", "線名", "駅名称", "線路名", "本準側名", "WB", "キロ程", "測定日")
     For i = LBound(need) To UBound(need)
         If Not hP.Exists(need(i)) Then problems.Add "前回シートに見出し「" & need(i) & "」がありません"
         If Not hC.Exists(need(i)) Then problems.Add "今回シートに見出し「" & need(i) & "」がありません"
@@ -140,11 +140,12 @@ Public Sub 比較シート作成()
 
     Dim outArr() As Variant
     ReDim outArr(1 To nCurr + 1, 1 To nCols)
-    outArr(1, 1) = "No": outArr(1, 2) = "線名": outArr(1, 3) = "線路名"
-    outArr(1, 4) = "キロ程": outArr(1, 5) = "判定": outArr(1, 6) = "該当項目"
-    outArr(1, 7) = "前回実績番号": outArr(1, 8) = "今回実績番号"
-    outArr(1, 9) = "前回測定日": outArr(1, 10) = "今回測定日"
-    outArr(1, 11) = "WB": outArr(1, 12) = "本準側名"
+    outArr(1, 1) = "No": outArr(1, 2) = "線名": outArr(1, 3) = "駅名称"
+    outArr(1, 4) = "線路名": outArr(1, 5) = "キロ程": outArr(1, 6) = "判定"
+    outArr(1, 7) = "該当項目"
+    outArr(1, 8) = "前回実績番号": outArr(1, 9) = "今回実績番号"
+    outArr(1, 10) = "前回測定日": outArr(1, 11) = "今回測定日"
+    outArr(1, 12) = "WB": outArr(1, 13) = "本準側名"
     For i = 1 To N_ITEMS
         outArr(1, itemCol(i)) = itemName(i) & "前回"
         outArr(1, itemCol(i) + 1) = itemName(i) & "今回"
@@ -182,14 +183,15 @@ Public Sub 比較シート作成()
 
             outArr(o, 1) = ToNum(dC(r, hC("No")))
             outArr(o, 2) = dC(r, hC("線名"))
-            outArr(o, 3) = dC(r, hC("線路名"))
-            outArr(o, 4) = ToNum(dC(r, hC("キロ程")))
-            If pRow > 0 Then outArr(o, 7) = ToNum(dP(pRow, hP("実績番号")))
-            outArr(o, 8) = ToNum(dC(r, hC("実績番号")))
-            If pRow > 0 Then outArr(o, 9) = ToNum(dP(pRow, hP("測定日")))
-            outArr(o, 10) = ToNum(dC(r, hC("測定日")))
-            outArr(o, 11) = dC(r, hC("WB"))
-            outArr(o, 12) = dC(r, hC("本準側名"))
+            outArr(o, 3) = dC(r, hC("駅名称"))
+            outArr(o, 4) = dC(r, hC("線路名"))
+            outArr(o, 5) = ToNum(dC(r, hC("キロ程")))
+            If pRow > 0 Then outArr(o, 8) = ToNum(dP(pRow, hP("実績番号")))
+            outArr(o, 9) = ToNum(dC(r, hC("実績番号")))
+            If pRow > 0 Then outArr(o, 10) = ToNum(dP(pRow, hP("測定日")))
+            outArr(o, 11) = ToNum(dC(r, hC("測定日")))
+            outArr(o, 12) = dC(r, hC("WB"))
+            outArr(o, 13) = dC(r, hC("本準側名"))
 
             worst = 0: hitList = ""
             For i = 1 To N_ITEMS
@@ -233,18 +235,18 @@ Public Sub 比較シート作成()
                 End If
             Next
             If worst = 2 Then
-                outArr(o, 5) = "15mm以上"
-                AddFill fillR, fillC, fillClr, nFill, capFill, o, 5, clrRed
+                outArr(o, 6) = "15mm以上"
+                AddFill fillR, fillC, fillClr, nFill, capFill, o, 6, clrRed
                 extRows.Add o
             ElseIf worst = 1 Then
-                outArr(o, 5) = "10mm以上15mm未満"
-                AddFill fillR, fillC, fillClr, nFill, capFill, o, 5, clrOrange
+                outArr(o, 6) = "10mm以上15mm未満"
+                AddFill fillR, fillC, fillClr, nFill, capFill, o, 6, clrOrange
                 extRows.Add o
             End If
-            outArr(o, 6) = hitList
+            outArr(o, 7) = hitList
             If pRow = 0 Then
-                unmatchedCurr.Add outArr(o, 4)
-                outArr(o, 6) = IIf(hitList = "", "(前回データなし)", hitList & "、(前回データなし)")
+                unmatchedCurr.Add outArr(o, 5)
+                outArr(o, 7) = IIf(hitList = "", "(前回データなし)", hitList & "、(前回データなし)")
             End If
         End If
     Next
@@ -278,7 +280,7 @@ Public Sub 比較シート作成()
             .Interior.Color = RGB(217, 225, 242)
         End With
         ' 数値の表示形式(小数1桁)
-        .Range(.Cells(2, 4), .Cells(nCurr + 1, 4)).NumberFormat = "0.0"   ' キロ程
+        .Range(.Cells(2, 5), .Cells(nCurr + 1, 5)).NumberFormat = "0.0"   ' キロ程
         For i = 1 To N_ITEMS
             .Range(.Cells(2, itemCol(i)), .Cells(nCurr + 1, itemCol(i) + 2)).NumberFormat = "0.0"
         Next
@@ -289,10 +291,11 @@ Public Sub 比較シート作成()
         .Range(.Cells(1, 1), .Cells(nCurr + 1, nCols)).AutoFilter
         .Columns("A:" & ColLetter(nCols)).ColumnWidth = 11
         .Columns("A").ColumnWidth = 6
-        .Columns("E").ColumnWidth = 16
-        .Columns("F").ColumnWidth = 18
+        .Columns("C").ColumnWidth = 10
+        .Columns("F").ColumnWidth = 16
+        .Columns("G").ColumnWidth = 18
         .Activate
-        .Range("G2").Select
+        .Range("H2").Select
         ActiveWindow.FreezePanes = True
     End With
 
@@ -308,11 +311,12 @@ Public Sub 比較シート作成()
     With wsE
         .Columns("A:" & ColLetter(nCols)).ColumnWidth = 11
         .Columns("A").ColumnWidth = 6
-        .Columns("E").ColumnWidth = 16
-        .Columns("F").ColumnWidth = 18
+        .Columns("C").ColumnWidth = 10
+        .Columns("F").ColumnWidth = 16
+        .Columns("G").ColumnWidth = 18
         If er > 1 Then .Range(.Cells(1, 1), .Cells(er, nCols)).AutoFilter
         .Activate
-        .Range("G2").Select
+        .Range("H2").Select
         ActiveWindow.FreezePanes = True
     End With
 
